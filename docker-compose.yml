@@ -1,0 +1,158 @@
+name: ${COMPOSE_PROJECT_NAME:-bmsrecorder}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8-alpine
+    restart: unless-stopped
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./config/clickhouse/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  influxdb:
+    image: influxdb:2.7-alpine
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_ADMIN_USER}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_ADMIN_PASSWORD}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN}
+    volumes:
+      - influx-data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    profiles: ["archive"]
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+
+  api:
+    build: ./services/api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUXDB_ADMIN_TOKEN}
+      INFLUX_ORG: ${INFLUXDB_ORG}
+      INFLUX_BUCKET: ${INFLUXDB_BUCKET}
+      APP_MASTER_KEY: ${APP_MASTER_KEY}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      DEMO_DATA: ${DEMO_DATA:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+
+  knx-collector:
+    build: ./services/knx-collector
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      API_URL: http://127.0.0.1:${PUBLIC_PORT:-8080}/api
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      KNX_BIND_IP: 0.0.0.0
+    depends_on:
+      - api
+
+  protocol-collector:
+    build: ./services/protocol-collector
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      API_URL: http://127.0.0.1:${PUBLIC_PORT:-8080}/api
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+    depends_on:
+      - api
+
+  decoder:
+    build: ./services/decoder
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUXDB_ADMIN_TOKEN}
+      INFLUX_ORG: ${INFLUXDB_ORG}
+      INFLUX_BUCKET: ${INFLUXDB_BUCKET}
+      SENSOR_ID: vm-main
+    volumes:
+      - pcap-spool:/pcap:ro
+      - decoder-state:/state
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  capture:
+    build: ./services/capture
+    restart: unless-stopped
+    profiles: ["capture"]
+    network_mode: host
+    cap_add: ["NET_ADMIN", "NET_RAW"]
+    environment:
+      CAPTURE_INTERFACE: ${CAPTURE_INTERFACE}
+      CAPTURE_FILTER: ${CAPTURE_FILTER}
+      PCAP_FILESIZE_KB: ${PCAP_FILESIZE_KB:-100000}
+      PCAP_FILE_COUNT: ${PCAP_FILE_COUNT:-96}
+    volumes:
+      - pcap-spool:/pcap
+
+  ui:
+    build: ./ui
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+    depends_on:
+      - api
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_PORT:-8080}:80"
+    volumes:
+      - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+      - ui
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  influx-data:
+  minio-data:
+  pcap-spool:
+  decoder-state:
