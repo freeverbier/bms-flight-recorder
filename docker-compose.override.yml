@@ -1,0 +1,22 @@
+services:
+  minio:
+    profiles: ["archive"]
+
+  clickhouse:
+    environment:
+      CLICKHOUSE_USER: bmsrecorder
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Mot de passe absent}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+  api:
+    environment:
+      CLICKHOUSE_URL: http://bmsrecorder:${CLICKHOUSE_PASSWORD}@clickhouse:8123
+
+  decoder:
+    environment:
+      CLICKHOUSE_URL: http://bmsrecorder:${CLICKHOUSE_PASSWORD}@clickhouse:8123
